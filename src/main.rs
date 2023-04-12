@@ -1,3 +1,4 @@
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use std::{
     env, fs,
     fs::File,
@@ -57,7 +58,6 @@ fn serialize_tree(node: &WtarFile, meta_buf: &mut Vec<u8>, file_list: &mut Vec<S
     meta_buf.extend_from_slice(node.path.as_bytes());
     meta_buf.push(node.is_dir as u8);
     if node.is_dir {
-        // meta_buf.extend_from_slice(&(node.children.len() as u32).to_le_bytes());
         for child_file in &node.children {
             serialize_tree(child_file, meta_buf, file_list);
         }
@@ -78,7 +78,15 @@ fn write_files(out_file: &mut File, file_list: &Vec<String>) {
     }
 }
 
-fn create_wtar(target_folder: &str, outfile_name: &str) {
+fn create_wtar(target_folder: &str) {
+    let mut target_folder = String::from(target_folder);
+
+    if target_folder.ends_with("/") {
+        target_folder.pop();
+    }
+
+    let outfile_name = format!("{}.wtar", target_folder);
+
     let mut root = WtarFile {
         path: target_folder.to_owned(),
         is_dir: true,
@@ -94,9 +102,9 @@ fn create_wtar(target_folder: &str, outfile_name: &str) {
     serialize_tree(&root, &mut metadata_buf, &mut file_list);
     metadata_buf.splice(0..0, (metadata_buf.len() as u32).to_le_bytes());
 
-    let mut target_file = match File::create(outfile_name) {
+    let mut target_file = match File::create(&outfile_name) {
         Ok(f) => f,
-        Err(error) => panic!("Error creating file {}: {}", outfile_name, error),
+        Err(error) => panic!("Error creating file {}: {}", &outfile_name, error),
     };
 
     target_file
@@ -104,6 +112,23 @@ fn create_wtar(target_folder: &str, outfile_name: &str) {
         .expect("Failed to write to target file");
 
     write_files(&mut target_file, &file_list);
+    drop(target_file);
+
+    let mut target_file = File::open(&outfile_name).expect("Cannot open target file");
+
+    let target_name_gz = format!("{}{}", &outfile_name, ".gz");
+    let mut target_file_gz = match File::create(&target_name_gz) {
+        Ok(f) => f,
+        Err(error) => panic!("Error creating file {}: {}", target_name_gz, error),
+    };
+    let mut encoder = GzEncoder::new(&mut target_file_gz, Compression::best());
+
+    io::copy(&mut target_file, &mut encoder).expect("Error writing to output file");
+
+    drop(target_file);
+    fs::remove_file(outfile_name).expect("Failed to delete intermediate file");
+
+    encoder.finish().expect("Cannot flush target");
 }
 
 fn read_bytes_from_file(file: &mut File, n_bytes: usize) -> Vec<u8> {
@@ -136,9 +161,27 @@ fn get_overwrite_inp(file_name: &str) {
 }
 
 fn extract_wtar(infile_path: &str) {
-    let mut infile = match File::open(infile_path) {
+    let infile_gz = match File::open(infile_path) {
         Ok(f) => f,
         Err(error) => panic!("Error opening source file {}: {}", infile_path, error),
+    };
+
+    let mut decoder = GzDecoder::new(infile_gz);
+
+    let intermediate_path = Path::new(infile_path)
+        .file_stem()
+        .expect("Invalid file name");
+    let mut infile = match File::create(intermediate_path) {
+        Ok(f) => f,
+        Err(error) => panic!("Error creating intermediate file: {}", error),
+    };
+
+    io::copy(&mut decoder, &mut infile).expect("Error decompressing file");
+
+    drop(infile);
+    let mut infile = match File::open(intermediate_path) {
+        Ok(f) => f,
+        Err(error) => panic!("Error opening intermediate file: {}", error),
     };
 
     let data_offset = read_u32_from_file(&mut infile) as u64 + 4;
@@ -194,16 +237,18 @@ fn extract_wtar(infile_path: &str) {
         }
         curr_offset = infile.seek(SeekFrom::Current(0)).unwrap();
     }
+
+    fs::remove_file(intermediate_path).expect("Failed to delete intermediate file");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() == 4 && args[1] == "-c" {
-        create_wtar(&args[3], &args[2]);
+    if args.len() == 3 && args[1] == "-c" {
+        create_wtar(&args[2]);
     } else if args.len() == 3 && args[1] == "-e" {
         extract_wtar(&args[2]);
     } else {
-        println!("Usage: wtar <OPTION> <FILE/FOLDER>...\n\nExamples:\n  wtar -c archive.wtar infolder/    Create an archive named archive.wtar from the folder infolder\n  wtar -e archive.wtar              Extract the archive archive.wtar");
+        println!("Usage: wtar <OPTION> <FILE/FOLDER>...\n\nExamples:\n  wtar -c infolder/            Create an archive named infolder.wtar.gz from the folder infolder\n  wtar -e archive.wtar.gz      Extract the archive archive.wtar");
     }
 }
