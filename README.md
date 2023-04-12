@@ -4,7 +4,7 @@ A bare-bones [tar](<https://en.wikipedia.org/wiki/Tar_(computing)>) clone, writt
 
 ## Usage
 
-### Creating an compressed archive
+### Creating a compressed archive
 
 ```sh
 wtar -c infolder/
